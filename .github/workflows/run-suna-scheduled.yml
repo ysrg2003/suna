@@ -1,4 +1,4 @@
-name: Run Suna (scheduled 6h, ephemeral, with ngrok)
+name: Suna Deployment
 
 on:
   schedule:
