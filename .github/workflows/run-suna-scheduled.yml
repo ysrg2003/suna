@@ -1,4 +1,4 @@
-name: Suna Deployment
+name: SUNA_AUTO_DEPLOY
 
 on:
   schedule:
