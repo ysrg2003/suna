@@ -1,0 +1,100 @@
+name: Run Suna (scheduled 6h, ephemeral, with ngrok)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours (UTC)
+  workflow_dispatch: {}
+
+jobs:
+  run-suna:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 hours
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq unzip curl build-essential
+          docker version || (curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh)
+          docker compose version || true
+
+      - name: Create backend .env (secret-backed)
+        run: |
+          mkdir -p backend
+          cat > backend/.env <<'INNER_EOF'
+SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+SUPABASE_JWT_SECRET=${{ secrets.SUPABASE_JWT_SECRET }}
+OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+REDIS_URL=${{ secrets.REDIS_URL }}
+INNER_EOF
+          chmod 600 backend/.env
+
+      - name: Start Suna (docker compose)
+        run: |
+          docker compose pull || true
+          docker compose up -d
+        working-directory: ${{ github.workspace }}
+
+      - name: Wait for frontend readiness
+        run: |
+          for i in {1..120}; do
+            if curl -sSf http://localhost:3000/ >/dev/null 2>&1; then
+              echo "frontend ready"
+              break
+            fi
+            echo "waiting for frontend... ($i)"
+            sleep 5
+          done
+
+      - name: Install ngrok and start tunnel
+        run: |
+          NGROK_ZIP="ngrok-stable-linux-amd64.zip"
+          wget -q "https://bin.equinox.io/c/4VmDzA7iaHb/$NGROK_ZIP" -O $NGROK_ZIP
+          unzip -qq $NGROK_ZIP -d $GITHUB_WORKSPACE
+          chmod +x $GITHUB_WORKSPACE/ngrok
+          $GITHUB_WORKSPACE/ngrok authtoken "${{ secrets.NGROK_AUTH_TOKEN }}" || true
+          nohup $GITHUB_WORKSPACE/ngrok http 3000 --log=stdout > ngrok.log 2>&1 &
+          sleep 4
+          for i in {1..10}; do
+            curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' > public_url.txt && break || sleep 2
+          done
+          echo "PUBLIC_URL=$(cat public_url.txt || echo 'NOT_READY')" >> $GITHUB_OUTPUT
+        env:
+          PATH: ${{ github.workspace }}:$PATH
+
+      - name: Show the public URL
+        run: |
+          echo "Open this URL from your phone while the run is active:"
+          curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' || echo "ngrok not ready yet; check logs"
+
+      - name: Stream docker logs (keep job alive; will auto-stop at 6h)
+        run: |
+          docker compose logs -f
+        working-directory: ${{ github.workspace }}
